@@ -17,12 +17,11 @@ static const char *MENU[] = {
 /*
  * waiter_thread — Producer
  *
- * Each waiter continuously:
- *   1. Builds an order (10% chance VIP priority)
- *   2. With 5% probability, cancels a pending order already in queue
- *      (demonstrates order cancellation + reprioritization from proposal)
- *   3. Enqueues the new order (mutex-protected via queue_enqueue)
- *   4. Sleeps 500–2500ms to simulate customer arrival rate
+ * Respects two user-controlled globals:
+ *   g_paused         — if 1, waiter sleeps and generates no orders
+ *   g_waiter_delay_ms — controls how fast orders are generated
+ *
+ * Also has 5% chance to cancel a pending order each cycle.
  */
 void *waiter_thread(void *arg) {
     WaiterArgs  *w   = (WaiterArgs *)arg;
@@ -31,7 +30,13 @@ void *waiter_thread(void *arg) {
     unsigned int seed = (unsigned int)time(NULL) ^ (tid * 2654435761u);
 
     while (g_running) {
-        /* Build a new order */
+
+        /* ── Pause check ─────────────────────────────────────── */
+        while (g_paused && g_running)
+            usleep(100000);  /* sleep 100ms while paused */
+        if (!g_running) break;
+
+        /* ── Build order ─────────────────────────────────────── */
         Order o;
         memset(&o, 0, sizeof(o));
 
@@ -47,11 +52,7 @@ void *waiter_thread(void *arg) {
         o.priority    = (rand_r(&seed) % 10 == 0) ? PRIORITY_VIP : PRIORITY_NORMAL;
         strncpy(o.item, MENU[rand_r(&seed) % MENU_SIZE], MAX_ITEM_LEN - 1);
 
-        /* ── Order Cancellation (5% chance) ─────────────────────
-         * Demonstrates proposal's "order cancellation and
-         * reprioritization" additional feature.
-         * Mutex protects queue during removal.
-         * ─────────────────────────────────────────────────────── */
+        /* ── Order Cancellation (5% chance) ──────────────────── */
         if (rand_r(&seed) % 20 == 0) {
             pthread_mutex_lock(&g_queue.mutex);
             int cancelled_id = -1;
@@ -59,22 +60,20 @@ void *waiter_thread(void *arg) {
                 int idx = (g_queue.head + ci) % MAX_QUEUE_SIZE;
                 if (g_queue.orders[idx].status == STATUS_PENDING) {
                     cancelled_id = g_queue.orders[idx].id;
-                    /* Shift remaining entries to fill the gap */
                     for (int cj = ci; cj < g_queue.count - 1; cj++) {
                         int a = (g_queue.head + cj)     % MAX_QUEUE_SIZE;
                         int b = (g_queue.head + cj + 1) % MAX_QUEUE_SIZE;
                         g_queue.orders[a] = g_queue.orders[b];
                     }
                     g_queue.count--;
-                    g_queue.tail = (g_queue.tail - 1 + MAX_QUEUE_SIZE)
-                                   % MAX_QUEUE_SIZE;
+                    g_queue.tail = (g_queue.tail - 1 + MAX_QUEUE_SIZE) % MAX_QUEUE_SIZE;
                     break;
                 }
             }
             pthread_mutex_unlock(&g_queue.mutex);
 
             if (cancelled_id != -1) {
-                sem_post(&g_queue.spaces_available); /* restore free slot */
+                sem_post(&g_queue.spaces_available);
                 pthread_mutex_lock(&g_stats_mutex);
                 g_total_cancelled++;
                 pthread_mutex_unlock(&g_stats_mutex);
@@ -82,7 +81,7 @@ void *waiter_thread(void *arg) {
             }
         }
 
-        /* ── Enqueue new order ───────────────────────────────── */
+        /* ── Enqueue ─────────────────────────────────────────── */
         queue_enqueue(&g_queue, &o);
         order_counter++;
 
@@ -91,9 +90,10 @@ void *waiter_thread(void *arg) {
         else
             log_event("[W%d] Order #%d: %s", 4, tid, o.id, o.item);
 
-        /* Simulate customer arrival rate: 500–2500ms */
-        int delay_ms = 500 + rand_r(&seed) % 2000;
-        usleep(delay_ms * 1000);
+        /* ── Delay controlled by user (+/-) ──────────────────── */
+        int delay = g_waiter_delay_ms + (int)(rand_r(&seed) % 500) - 250;
+        if (delay < 100) delay = 100;
+        usleep(delay * 1000);
     }
 
     w->orders_placed = order_counter;

@@ -15,35 +15,32 @@
 
 /* ═══════════════════════════════════════════════════════════════
  *  GLOBAL DEFINITIONS
- *  (declared extern in queue.h; defined exactly once here)
  * ═══════════════════════════════════════════════════════════════ */
-
 OrderQueue      g_queue;
 sem_t           g_kitchen_stations;
-volatile int    g_running        = 1;
-volatile int    g_total_placed   = 0;
-volatile int    g_total_completed= 0;
-volatile int    g_total_cancelled= 0;
-double          g_total_wait_time= 0.0;
-pthread_mutex_t g_stats_mutex    = PTHREAD_MUTEX_INITIALIZER;
+volatile int    g_running         = 1;
+volatile int    g_paused          = 0;       /* p key toggles */
+volatile int    g_waiter_delay_ms = 1500;    /* +/- keys adjust */
+volatile int    g_total_placed    = 0;
+volatile int    g_total_completed = 0;
+volatile int    g_total_cancelled = 0;
+double          g_total_wait_time = 0.0;
+pthread_mutex_t g_stats_mutex     = PTHREAD_MUTEX_INITIALIZER;
 
 LogEntry        g_log[MAX_LOG_ENTRIES];
-int             g_log_head       = 0;
-int             g_log_count      = 0;
-pthread_mutex_t g_log_mutex      = PTHREAD_MUTEX_INITIALIZER;
+int             g_log_head        = 0;
+int             g_log_count       = 0;
+pthread_mutex_t g_log_mutex       = PTHREAD_MUTEX_INITIALIZER;
 
 Order           g_history[MAX_HISTORY];
-int             g_history_count  = 0;
-pthread_mutex_t g_history_mutex  = PTHREAD_MUTEX_INITIALIZER;
+int             g_history_count   = 0;
+pthread_mutex_t g_history_mutex   = PTHREAD_MUTEX_INITIALIZER;
 
-/* ─── Signal handler for Ctrl+C ─────────────────────────────── */
-static void handle_signal(int sig) {
-    (void)sig;
-    g_running = 0;
-}
+/* ─── Signal handler ─────────────────────────────────────────── */
+static void handle_signal(int sig) { (void)sig; g_running = 0; }
 
-/* ─── Print final report after ncurses exits ─────────────────── */
-static void print_final_report(WaiterArgs *waiters, ChefArgs *chefs) {
+/* ─── Final report ───────────────────────────────────────────── */
+static void print_final_report(WaiterArgs *waiters) {
     printf("\n");
     printf("╔══════════════════════════════════════════════════╗\n");
     printf("║        RESTAURANT SIMULATION — FINAL REPORT      ║\n");
@@ -63,7 +60,7 @@ static void print_final_report(WaiterArgs *waiters, ChefArgs *chefs) {
     printf("║  CHEF STATS                                      ║\n");
     for (int i = 0; i < NUM_CHEFS; i++)
         printf("║    Chef %d completed : %-26d║\n",
-               chefs[i].id, chefs[i].orders_completed);
+               g_chefs[i].id, g_chefs[i].orders_completed);
     printf("╚══════════════════════════════════════════════════╝\n");
 }
 
@@ -73,69 +70,104 @@ static void print_final_report(WaiterArgs *waiters, ChefArgs *chefs) {
 int main(void) {
     srand((unsigned)time(NULL));
 
-    /* ── Init shared structures ─────────────────────────────── */
     queue_init(&g_queue);
     sem_init(&g_kitchen_stations, 0, KITCHEN_STATIONS);
 
     signal(SIGINT,  handle_signal);
     signal(SIGTERM, handle_signal);
 
-    /* ── Create waiter threads ──────────────────────────────── */
-    pthread_t   waiter_tids[NUM_WAITERS];
-    WaiterArgs  waiters[NUM_WAITERS];
+    /* ── Waiter threads ─────────────────────────────────────── */
+    pthread_t  waiter_tids[NUM_WAITERS];
+    WaiterArgs waiters[NUM_WAITERS];
     for (int i = 0; i < NUM_WAITERS; i++) {
-        waiters[i].id           = i + 1;
-        waiters[i].orders_placed= 0;
+        waiters[i].id            = i + 1;
+        waiters[i].orders_placed = 0;
         pthread_create(&waiter_tids[i], NULL, waiter_thread, &waiters[i]);
     }
 
-    /* ── Create chef threads ────────────────────────────────── */
-    pthread_t  chef_tids[NUM_CHEFS];
+    /* ── Chef threads ───────────────────────────────────────── */
+    pthread_t chef_tids[NUM_CHEFS];
     for (int i = 0; i < NUM_CHEFS; i++) {
-        g_chefs[i].id               = i + 1;
-        g_chefs[i].orders_completed = 0;
-        g_chefs[i].currently_cooking= 0;
+        g_chefs[i].id                = i + 1;
+        g_chefs[i].orders_completed  = 0;
+        g_chefs[i].currently_cooking = 0;
         memset(g_chefs[i].current_item, 0, MAX_ITEM_LEN);
         pthread_create(&chef_tids[i], NULL, chef_thread, &g_chefs[i]);
     }
 
-    /* ── Init ncurses dashboard ─────────────────────────────── */
+    /* ── Dashboard ──────────────────────────────────────────── */
     dashboard_init();
 
-    /* ── Main loop: refresh dashboard at ~10 FPS ────────────── */
+    /* ── Main loop ──────────────────────────────────────────── */
     while (g_running) {
         int ch = getch();
-        if (ch == 'q' || ch == 'Q')
+
+        switch (ch) {
+
+        /* ── Quit ──────────────────────────────────────────── */
+        case 'q': case 'Q':
             g_running = 0;
+            break;
+
+        /* ── Pause / Resume all waiters ────────────────────── */
+        case 'p': case 'P':
+            g_paused = !g_paused;
+            log_event("[USER] %s", 5, g_paused ? "PAUSED" : "RESUMED");
+            break;
+
+        /* ── Speed up waiters (shorter delay) ──────────────── */
+        case '+': case '=':
+            if (g_waiter_delay_ms > 200)
+                g_waiter_delay_ms -= 200;
+            log_event("[USER] Speed UP  — delay %dms", 4, g_waiter_delay_ms);
+            break;
+
+        /* ── Slow down waiters (longer delay) ──────────────── */
+        case '-': case '_':
+            if (g_waiter_delay_ms < 5000)
+                g_waiter_delay_ms += 200;
+            log_event("[USER] Speed DOWN — delay %dms", 4, g_waiter_delay_ms);
+            break;
+
+        /* ── Inject a VIP order manually ───────────────────── */
+        case 'v': case 'V':
+            action_inject_vip();
+            break;
+
+        /* ── Cancel the oldest pending order ───────────────── */
+        case 'c': case 'C':
+            action_cancel_oldest();
+            break;
+
+        /* ── Reset stats counters ──────────────────────────── */
+        case 'r': case 'R':
+            action_reset_stats();
+            break;
+
+        default:
+            break;
+        }
 
         dashboard_draw();
-        usleep(100000);   /* 100ms */
+        usleep(100000);   /* 10 FPS */
     }
 
-    /* ── Shutdown ────────────────────────────────────────────── */
+    /* ── Shutdown: wake all blocked threads ─────────────────── */
     dashboard_cleanup();
 
-    /* Wake any blocked threads so they can exit */
-    for (int i = 0; i < NUM_CHEFS; i++)
-        sem_post(&g_queue.items_available);
-    for (int i = 0; i < NUM_CHEFS; i++)
-        sem_post(&g_kitchen_stations);
-    for (int i = 0; i < NUM_WAITERS; i++)
-        sem_post(&g_queue.spaces_available);
+    for (int i = 0; i < NUM_CHEFS; i++)   sem_post(&g_queue.items_available);
+    for (int i = 0; i < NUM_CHEFS; i++)   sem_post(&g_kitchen_stations);
+    for (int i = 0; i < NUM_WAITERS; i++) sem_post(&g_queue.spaces_available);
 
-    /* ── Join all threads ───────────────────────────────────── */
-    for (int i = 0; i < NUM_WAITERS; i++)
-        pthread_join(waiter_tids[i], NULL);
-    for (int i = 0; i < NUM_CHEFS; i++)
-        pthread_join(chef_tids[i], NULL);
+    for (int i = 0; i < NUM_WAITERS; i++) pthread_join(waiter_tids[i], NULL);
+    for (int i = 0; i < NUM_CHEFS; i++)   pthread_join(chef_tids[i],   NULL);
 
-    /* ── Cleanup ─────────────────────────────────────────────── */
     queue_destroy(&g_queue);
     sem_destroy(&g_kitchen_stations);
     pthread_mutex_destroy(&g_stats_mutex);
     pthread_mutex_destroy(&g_log_mutex);
     pthread_mutex_destroy(&g_history_mutex);
 
-    print_final_report(waiters, g_chefs);
+    print_final_report(waiters);
     return 0;
 }

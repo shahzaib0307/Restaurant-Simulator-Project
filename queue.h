@@ -36,13 +36,13 @@ typedef struct {
     OrderStatus   status;
     time_t        time_placed;
     time_t        time_completed;
-    double        wait_seconds;   /* completed - placed */
+    double        wait_seconds;
 } Order;
 
-/* ─── Log entry (for dashboard event feed) ───────────────────── */
+/* ─── Log entry ──────────────────────────────────────────────── */
 typedef struct {
     char msg[128];
-    int  color_pair; /* ncurses color pair index */
+    int  color_pair;
 } LogEntry;
 
 /* ─── Shared queue ───────────────────────────────────────────── */
@@ -51,7 +51,6 @@ typedef struct {
     int             head;
     int             tail;
     int             count;
-
     pthread_mutex_t mutex;
     sem_t           items_available;
     sem_t           spaces_available;
@@ -61,19 +60,21 @@ typedef struct {
 extern OrderQueue      g_queue;
 extern sem_t           g_kitchen_stations;
 extern volatile int    g_running;
+extern volatile int    g_paused;          /* NEW: pause waiters */
+extern volatile int    g_waiter_delay_ms; /* NEW: waiter speed  */
 extern volatile int    g_total_placed;
 extern volatile int    g_total_completed;
 extern volatile int    g_total_cancelled;
 extern double          g_total_wait_time;
 extern pthread_mutex_t g_stats_mutex;
 
-/* Event log ring buffer */
+/* Event log */
 extern LogEntry        g_log[MAX_LOG_ENTRIES];
 extern int             g_log_head;
 extern int             g_log_count;
 extern pthread_mutex_t g_log_mutex;
 
-/* ─── Completed order history (for dashboard) ────────────────── */
+/* Completed history */
 #define MAX_HISTORY 50
 extern Order           g_history[MAX_HISTORY];
 extern int             g_history_count;
@@ -85,5 +86,10 @@ int  queue_enqueue(OrderQueue *q, Order *order);
 int  queue_dequeue(OrderQueue *q, Order *out);
 void queue_destroy(OrderQueue *q);
 void log_event    (const char *fmt, int color_pair, ...);
+
+/* User-input actions (called from main loop) */
+void action_inject_vip   (void);
+void action_cancel_oldest(void);
+void action_reset_stats  (void);
 
 #endif /* QUEUE_H */

@@ -90,3 +90,89 @@ void log_event(const char *fmt, int color_pair, ...) {
     pthread_mutex_unlock(&g_log_mutex);
     va_end(ap);
 }
+
+/* ─── User-triggered actions ─────────────────────────────────── */
+
+static const char *VIP_ITEMS[] = {
+    "Lobster Thermidor", "Wagyu Steak", "Truffle Pasta", "Champagne Risotto"
+};
+#define VIP_ITEM_COUNT 4
+
+/*
+ * action_inject_vip — manually force a VIP order into the queue.
+ * Called from the main thread on keypress 'v'.
+ * Uses queue_enqueue() so the same mutex/semaphore path is exercised.
+ */
+void action_inject_vip(void) {
+    Order o;
+    memset(&o, 0, sizeof(o));
+
+    pthread_mutex_lock(&g_stats_mutex);
+    g_total_placed++;
+    o.id = g_total_placed;
+    pthread_mutex_unlock(&g_stats_mutex);
+
+    o.waiter_id   = 0;   /* 0 = injected by user */
+    o.chef_id     = -1;
+    o.status      = STATUS_PENDING;
+    o.time_placed = time(NULL);
+    o.priority    = PRIORITY_VIP;
+    snprintf(o.item, MAX_ITEM_LEN, "%s", VIP_ITEMS[o.id % VIP_ITEM_COUNT]);
+
+    queue_enqueue(&g_queue, &o);
+    log_event("[USER] Injected VIP #%d: %s", 2, o.id, o.item);
+}
+
+/*
+ * action_cancel_oldest — remove the oldest PENDING order from the queue.
+ * Called from the main thread on keypress 'c'.
+ */
+void action_cancel_oldest(void) {
+    pthread_mutex_lock(&g_queue.mutex);
+    int cancelled_id = -1;
+    for (int i = 0; i < g_queue.count; i++) {
+        int idx = (g_queue.head + i) % MAX_QUEUE_SIZE;
+        if (g_queue.orders[idx].status == STATUS_PENDING) {
+            cancelled_id = g_queue.orders[idx].id;
+            /* Shift subsequent entries forward */
+            for (int j = i; j < g_queue.count - 1; j++) {
+                int a = (g_queue.head + j)     % MAX_QUEUE_SIZE;
+                int b = (g_queue.head + j + 1) % MAX_QUEUE_SIZE;
+                g_queue.orders[a] = g_queue.orders[b];
+            }
+            g_queue.count--;
+            g_queue.tail = (g_queue.tail - 1 + MAX_QUEUE_SIZE) % MAX_QUEUE_SIZE;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_queue.mutex);
+
+    if (cancelled_id != -1) {
+        sem_post(&g_queue.spaces_available);
+        pthread_mutex_lock(&g_stats_mutex);
+        g_total_cancelled++;
+        pthread_mutex_unlock(&g_stats_mutex);
+        log_event("[USER] Cancelled oldest order #%d", 3, cancelled_id);
+    } else {
+        log_event("[USER] No pending orders to cancel", 5);
+    }
+}
+
+/*
+ * action_reset_stats — zero out all performance counters.
+ * Called from the main thread on keypress 'r'.
+ */
+void action_reset_stats(void) {
+    pthread_mutex_lock(&g_stats_mutex);
+    g_total_placed    = 0;
+    g_total_completed = 0;
+    g_total_cancelled = 0;
+    g_total_wait_time = 0.0;
+    pthread_mutex_unlock(&g_stats_mutex);
+
+    pthread_mutex_lock(&g_history_mutex);
+    g_history_count = 0;
+    pthread_mutex_unlock(&g_history_mutex);
+
+    log_event("[USER] Stats reset", 4);
+}

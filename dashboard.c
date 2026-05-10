@@ -200,7 +200,6 @@ static void draw_stats(void) {
     pthread_mutex_unlock(&g_stats_mutex);
 
     double avg_wait = completed > 0 ? total_wait / completed : 0.0;
-    double throughput_approx = completed; /* simplified */
 
     wattron(w_stats, COLOR_PAIR(COL_CYAN));
     mvwprintw(w_stats, 1, 2, "Orders placed   : %d", placed);
@@ -216,8 +215,19 @@ static void draw_stats(void) {
 
     wattron(w_stats, COLOR_PAIR(COL_YELLOW));
     mvwprintw(w_stats, 4, 2, "Avg wait time   : %.1f sec", avg_wait);
-    mvwprintw(w_stats, 5, 2, "Total throughput: %d orders", (int)throughput_approx);
+    mvwprintw(w_stats, 5, 2, "Throughput      : %d orders", completed);
     wattroff(w_stats, COLOR_PAIR(COL_YELLOW));
+
+    /* Show speed and pause state */
+    if (g_paused) {
+        wattron(w_stats, COLOR_PAIR(COL_RED) | A_BOLD | A_BLINK);
+        mvwprintw(w_stats, 5, getmaxx(w_stats) - 12, " PAUSED ");
+        wattroff(w_stats, COLOR_PAIR(COL_RED) | A_BOLD | A_BLINK);
+    } else {
+        wattron(w_stats, COLOR_PAIR(COL_GREEN));
+        mvwprintw(w_stats, 5, getmaxx(w_stats) - 14, "spd:%4dms", g_waiter_delay_ms);
+        wattroff(w_stats, COLOR_PAIR(COL_GREEN));
+    }
 
     wnoutrefresh(w_stats);
 }
@@ -296,10 +306,8 @@ static void draw_footer(void) {
     werase(w_footer);
     wattron(w_footer, A_BOLD);
     mvwprintw(w_footer, 1, 2,
-              " Q = Quit | Mutex protects queue | "
-              "Semaphore limits stations to %d | "
-              "Producer-Consumer Pattern",
-              KITCHEN_STATIONS);
+              " Q:Quit  P:Pause/Resume  +:Faster  -:Slower"
+              "  V:Inject VIP  C:Cancel oldest  R:Reset stats ");
     wattroff(w_footer, A_BOLD);
     wnoutrefresh(w_footer);
 }
