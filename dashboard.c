@@ -306,8 +306,8 @@ static void draw_footer(void) {
     werase(w_footer);
     wattron(w_footer, A_BOLD);
     mvwprintw(w_footer, 1, 2,
-              " Q:Quit  P:Pause/Resume  +:Faster  -:Slower"
-              "  V:Inject VIP  C:Cancel oldest  R:Reset stats ");
+              " Q:Quit  P:Pause/Resume  F:Faster  S:Slower"
+              "  V:VIP  C:Cancel  R:Reset  O:Place Order manually ");
     wattroff(w_footer, A_BOLD);
     wnoutrefresh(w_footer);
 }
@@ -333,4 +333,222 @@ void dashboard_cleanup(void) {
     if (w_history) delwin(w_history);
     if (w_footer)  delwin(w_footer);
     endwin();
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * POPUP: Manual Order Entry  (O key)
+ *
+ * Shows a centered dialog where the user can:
+ *   - Type a dish name (up to 31 chars)
+ *   - Toggle Normal / VIP with TAB
+ *   - Choose waiter 1/2/3 with number keys
+ *   - Confirm with ENTER, cancel with ESC
+ * ═══════════════════════════════════════════════════════════════ */
+int popup_manual_order(char *dish_out, int dish_max,
+                       OrderPriority *prio_out, int *waiter_out)
+{
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+
+    int pw = 54, ph = 14;
+    int py = (rows - ph) / 2;
+    int px = (cols - pw) / 2;
+
+    WINDOW *pop = newwin(ph, pw, py, px);
+    keypad(pop, TRUE);
+    curs_set(1);   /* show cursor for typing */
+
+    char dish[MAX_ITEM_LEN] = {0};
+    int  dlen    = 0;
+    OrderPriority prio   = PRIORITY_NORMAL;
+    int  waiter  = 1;
+    int  confirmed = 0;
+
+    while (1) {
+        werase(pop);
+        wattron(pop, COLOR_PAIR(COL_BOX));
+        box(pop, 0, 0);
+        wattroff(pop, COLOR_PAIR(COL_BOX));
+
+        /* Title */
+        wattron(pop, COLOR_PAIR(COL_HEADER) | A_BOLD);
+        mvwprintw(pop, 0, (pw - 16) / 2, " NEW MANUAL ORDER ");
+        wattroff(pop, COLOR_PAIR(COL_HEADER) | A_BOLD);
+
+        /* Dish name field */
+        wattron(pop, COLOR_PAIR(COL_CYAN) | A_BOLD);
+        mvwprintw(pop, 2, 2, "Dish Name:");
+        wattroff(pop, COLOR_PAIR(COL_CYAN) | A_BOLD);
+        wattron(pop, COLOR_PAIR(COL_WHITE));
+        mvwprintw(pop, 3, 2, "[ %-30s ]", dish);
+        wattroff(pop, COLOR_PAIR(COL_WHITE));
+
+        /* Priority toggle */
+        wattron(pop, COLOR_PAIR(COL_CYAN) | A_BOLD);
+        mvwprintw(pop, 5, 2, "Priority:  (TAB to toggle)");
+        wattroff(pop, COLOR_PAIR(COL_CYAN) | A_BOLD);
+        if (prio == PRIORITY_NORMAL) {
+            wattron(pop, COLOR_PAIR(COL_WHITE) | A_BOLD);
+            mvwprintw(pop, 6, 2, "  [*] NORMAL    [ ] VIP  ");
+            wattroff(pop, COLOR_PAIR(COL_WHITE) | A_BOLD);
+        } else {
+            wattron(pop, COLOR_PAIR(COL_VIP) | A_BOLD);
+            mvwprintw(pop, 6, 2, "  [ ] NORMAL    [*] VIP  ");
+            wattroff(pop, COLOR_PAIR(COL_VIP) | A_BOLD);
+        }
+
+        /* Waiter selection */
+        wattron(pop, COLOR_PAIR(COL_CYAN) | A_BOLD);
+        mvwprintw(pop, 8, 2, "Waiter:  (press 1 / 2 / 3)");
+        wattroff(pop, COLOR_PAIR(COL_CYAN) | A_BOLD);
+        for (int w = 1; w <= NUM_WAITERS; w++) {
+            if (w == waiter) {
+                wattron(pop, COLOR_PAIR(COL_GREEN) | A_BOLD);
+                mvwprintw(pop, 9, 2 + (w-1)*14, "  [Waiter %d]  ", w);
+                wattroff(pop, COLOR_PAIR(COL_GREEN) | A_BOLD);
+            } else {
+                wattron(pop, COLOR_PAIR(COL_WHITE));
+                mvwprintw(pop, 9, 2 + (w-1)*14, "   Waiter %d   ", w);
+                wattroff(pop, COLOR_PAIR(COL_WHITE));
+            }
+        }
+
+        /* Instructions */
+        wattron(pop, COLOR_PAIR(COL_MAGENTA));
+        mvwprintw(pop, 11, 2, "ENTER = Confirm    ESC = Cancel");
+        wattroff(pop, COLOR_PAIR(COL_MAGENTA));
+
+        /* Position cursor at end of dish input */
+        wmove(pop, 3, 3 + dlen);
+        wrefresh(pop);
+
+        int ch = wgetch(pop);
+
+        if (ch == 27) {          /* ESC — cancel */
+            break;
+        } else if (ch == '\n' || ch == KEY_ENTER) {
+            if (dlen > 0) {      /* must have typed something */
+                confirmed = 1;
+                break;
+            }
+        } else if (ch == '\t') { /* TAB — toggle priority */
+            prio = (prio == PRIORITY_NORMAL) ? PRIORITY_VIP : PRIORITY_NORMAL;
+        } else if (ch == '1' || ch == '2' || ch == '3') {
+            waiter = ch - '0';
+        } else if ((ch == KEY_BACKSPACE || ch == 127 || ch == 8) && dlen > 0) {
+            dish[--dlen] = '\0';
+        } else if (ch >= 32 && ch < 127 && dlen < dish_max - 1) {
+            dish[dlen++] = (char)ch;
+            dish[dlen]   = '\0';
+        }
+    }
+
+    curs_set(0);
+    delwin(pop);
+    touchwin(stdscr);
+    refresh();
+
+    if (confirmed) {
+        strncpy(dish_out, dish, dish_max - 1);
+        dish_out[dish_max - 1] = '\0';
+        *prio_out   = prio;
+        *waiter_out = waiter;
+    }
+    return confirmed;
+}
+
+/* ═══════════════════════════════════════════════════════════════
+ * POPUP: Manual Chef Assignment  (A key)
+ *
+ * Shows which chefs are idle and lets the user pick one.
+ * The chosen chef gets the oldest pending order from the queue.
+ * ═══════════════════════════════════════════════════════════════ */
+int popup_assign_chef(int *chef_id_out)
+{
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+
+    int pw = 50, ph = 12;
+    int py = (rows - ph) / 2;
+    int px = (cols - pw) / 2;
+
+    WINDOW *pop = newwin(ph, pw, py, px);
+    keypad(pop, TRUE);
+
+    /* Check if there are any pending orders first */
+    pthread_mutex_lock(&g_queue.mutex);
+    int has_pending = 0;
+    for (int i = 0; i < g_queue.count; i++) {
+        int idx = (g_queue.head + i) % MAX_QUEUE_SIZE;
+        if (g_queue.orders[idx].status == STATUS_PENDING) {
+            has_pending = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_queue.mutex);
+
+    int confirmed = 0;
+
+    while (1) {
+        werase(pop);
+        wattron(pop, COLOR_PAIR(COL_BOX));
+        box(pop, 0, 0);
+        wattroff(pop, COLOR_PAIR(COL_BOX));
+
+        wattron(pop, COLOR_PAIR(COL_HEADER) | A_BOLD);
+        mvwprintw(pop, 0, (pw - 22) / 2, " ASSIGN ORDER TO CHEF ");
+        wattroff(pop, COLOR_PAIR(COL_HEADER) | A_BOLD);
+
+        if (!has_pending) {
+            wattron(pop, COLOR_PAIR(COL_RED) | A_BOLD);
+            mvwprintw(pop, 4, 4, "No pending orders in queue!");
+            mvwprintw(pop, 6, 4, "Press any key to close.");
+            wattroff(pop, COLOR_PAIR(COL_RED) | A_BOLD);
+            wrefresh(pop);
+            wgetch(pop);
+            break;
+        }
+
+        wattron(pop, COLOR_PAIR(COL_CYAN) | A_BOLD);
+        mvwprintw(pop, 2, 2, "Press chef number to assign oldest order:");
+        wattroff(pop, COLOR_PAIR(COL_CYAN) | A_BOLD);
+
+        /* Show each chef and their status */
+        for (int i = 0; i < NUM_CHEFS; i++) {
+            int busy = g_chefs[i].currently_cooking;
+            int row  = 4 + i;
+            if (busy) {
+                wattron(pop, COLOR_PAIR(COL_RED));
+                mvwprintw(pop, row, 4,
+                    "[%d] Chef %d — BUSY: %-20s",
+                    i+1, i+1, g_chefs[i].current_item);
+                wattroff(pop, COLOR_PAIR(COL_RED));
+            } else {
+                wattron(pop, COLOR_PAIR(COL_GREEN) | A_BOLD);
+                mvwprintw(pop, row, 4,
+                    "[%d] Chef %d — IDLE (ready to assign)",
+                    i+1, i+1);
+                wattroff(pop, COLOR_PAIR(COL_GREEN) | A_BOLD);
+            }
+        }
+
+        wattron(pop, COLOR_PAIR(COL_MAGENTA));
+        mvwprintw(pop, 8+0, 2, "Press 1/2/3 to assign   ESC to cancel");
+        wattroff(pop, COLOR_PAIR(COL_MAGENTA));
+
+        wrefresh(pop);
+
+        int ch = wgetch(pop);
+        if (ch == 27) break;   /* ESC */
+        if (ch >= '1' && ch <= '0' + NUM_CHEFS) {
+            *chef_id_out = ch - '0';
+            confirmed = 1;
+            break;
+        }
+    }
+
+    delwin(pop);
+    touchwin(stdscr);
+    refresh();
+    return confirmed;
 }

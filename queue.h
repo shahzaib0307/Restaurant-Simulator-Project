@@ -93,3 +93,12 @@ void action_cancel_oldest(void);
 void action_reset_stats  (void);
 
 #endif /* QUEUE_H */
+
+/* Manual order placement (called from main via popup) */
+void action_manual_order(const char *dish, OrderPriority priority, int waiter_id);
+/* Manual chef assignment — assign oldest pending order to specific chef */
+void action_assign_to_chef(int chef_id);
+
+/* Manual assignment slots (one per chef) */
+extern Order           g_assigned_order[NUM_CHEFS];
+extern volatile int    g_has_assignment[NUM_CHEFS];

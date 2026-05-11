@@ -36,6 +36,10 @@ Order           g_history[MAX_HISTORY];
 int             g_history_count   = 0;
 pthread_mutex_t g_history_mutex   = PTHREAD_MUTEX_INITIALIZER;
 
+/* Manual assignment slots */
+Order        g_assigned_order[NUM_CHEFS];
+volatile int g_has_assignment[NUM_CHEFS] = {0, 0, 0};
+
 /* ─── Signal handler ─────────────────────────────────────────── */
 static void handle_signal(int sig) { (void)sig; g_running = 0; }
 
@@ -115,18 +119,18 @@ int main(void) {
             log_event("[USER] %s", 5, g_paused ? "PAUSED" : "RESUMED");
             break;
 
-        /* ── Speed up waiters (shorter delay) ──────────────── */
-        case '+': case '=':
+        /* ── Speed up waiters: F key (shorter delay = faster orders) */
+        case 'f': case 'F': case '+': case '=':
             if (g_waiter_delay_ms > 200)
                 g_waiter_delay_ms -= 200;
-            log_event("[USER] Speed UP  — delay %dms", 4, g_waiter_delay_ms);
+            log_event("[USER] FASTER — order delay now %dms", 4, g_waiter_delay_ms);
             break;
 
-        /* ── Slow down waiters (longer delay) ──────────────── */
-        case '-': case '_':
+        /* ── Slow down waiters: S key (longer delay = slower orders) */
+        case 's': case 'S': case '-': case '_':
             if (g_waiter_delay_ms < 5000)
                 g_waiter_delay_ms += 200;
-            log_event("[USER] Speed DOWN — delay %dms", 4, g_waiter_delay_ms);
+            log_event("[USER] SLOWER — order delay now %dms", 4, g_waiter_delay_ms);
             break;
 
         /* ── Inject a VIP order manually ───────────────────── */
@@ -143,6 +147,22 @@ int main(void) {
         case 'r': case 'R':
             action_reset_stats();
             break;
+
+        /* ── Manual order entry popup ──────────────────────── */
+        /* Auto-pauses waiters, opens input dialog, auto-resumes */
+        case 'o': case 'O': {
+            char dish[MAX_ITEM_LEN] = {0};
+            OrderPriority prio;
+            int waiter_id;
+            int was_paused = g_paused;
+            g_paused = 1;                      /* pause waiters  */
+            nodelay(stdscr, FALSE);            /* blocking input */
+            if (popup_manual_order(dish, MAX_ITEM_LEN, &prio, &waiter_id))
+                action_manual_order(dish, prio, waiter_id);
+            nodelay(stdscr, TRUE);
+            if (!was_paused) g_paused = 0;    /* resume if wasn't already paused */
+            break;
+        }
 
         default:
             break;

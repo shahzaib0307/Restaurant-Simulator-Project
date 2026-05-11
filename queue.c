@@ -1,4 +1,5 @@
 #include "queue.h"
+#include "chef.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -175,4 +176,99 @@ void action_reset_stats(void) {
     pthread_mutex_unlock(&g_history_mutex);
 
     log_event("[USER] Stats reset", 4);
+}
+
+/* ─── Manual order placement ─────────────────────────────────── */
+/*
+ * action_manual_order — place a user-typed order into the queue.
+ * Called from the popup in main.c after user finishes typing.
+ * Uses the same queue_enqueue() path so mutex/semaphore apply.
+ */
+void action_manual_order(const char *dish, OrderPriority priority, int waiter_id) {
+    Order o;
+    memset(&o, 0, sizeof(o));
+
+    pthread_mutex_lock(&g_stats_mutex);
+    g_total_placed++;
+    o.id = g_total_placed;
+    pthread_mutex_unlock(&g_stats_mutex);
+
+    o.waiter_id   = waiter_id;   /* user-chosen waiter (1,2,3) */
+    o.chef_id     = -1;
+    o.status      = STATUS_PENDING;
+    o.time_placed = time(NULL);
+    o.priority    = priority;
+    strncpy(o.item, dish, MAX_ITEM_LEN - 1);
+    o.item[MAX_ITEM_LEN - 1] = '\0';
+
+    queue_enqueue(&g_queue, &o);
+
+    if (priority == PRIORITY_VIP)
+        log_event("[MANUAL] VIP #%d by W%d: %s", 2, o.id, waiter_id, o.item);
+    else
+        log_event("[MANUAL] Order #%d by W%d: %s", 4, o.id, waiter_id, o.item);
+}
+
+/* ─── Manual chef assignment ─────────────────────────────────── */
+/*
+ * action_assign_to_chef — forcibly assigns the oldest PENDING order
+ * to a specific chef, bypassing normal queue consumption.
+ * The chef must be idle (currently_cooking == 0).
+ *
+ * How it works:
+ *   1. Lock queue mutex, find first PENDING order
+ *   2. Remove it from the queue (shift entries)
+ *   3. Set chef_id on the order
+ *   4. Store in g_assigned_order[chef_id] flag slot
+ *   5. Post g_manual_assign[chef_id] semaphore to wake that chef
+ *
+ * Chef thread checks g_manual_assign semaphore each loop iteration.
+ */
+void action_assign_to_chef(int chef_id) {
+    /* chef_id is 1-based; array is 0-based */
+    int idx = chef_id - 1;
+    if (idx < 0 || idx >= NUM_CHEFS) return;
+
+    /* Chef must be idle */
+    if (g_chefs[idx].currently_cooking) {
+        log_event("[MANUAL] Chef %d is busy — cannot assign", 3, chef_id);
+        return;
+    }
+
+    /* Find and remove oldest pending order from queue */
+    pthread_mutex_lock(&g_queue.mutex);
+    int found = -1;
+    Order o;
+    for (int i = 0; i < g_queue.count; i++) {
+        int qi = (g_queue.head + i) % MAX_QUEUE_SIZE;
+        if (g_queue.orders[qi].status == STATUS_PENDING) {
+            o = g_queue.orders[qi];
+            found = i;
+            /* Shift remaining entries */
+            for (int j = i; j < g_queue.count - 1; j++) {
+                int a = (g_queue.head + j)     % MAX_QUEUE_SIZE;
+                int b = (g_queue.head + j + 1) % MAX_QUEUE_SIZE;
+                g_queue.orders[a] = g_queue.orders[b];
+            }
+            g_queue.count--;
+            g_queue.tail = (g_queue.tail - 1 + MAX_QUEUE_SIZE) % MAX_QUEUE_SIZE;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_queue.mutex);
+
+    if (found == -1) {
+        log_event("[MANUAL] No pending orders to assign", 5);
+        return;
+    }
+
+    /* Restore the queue slot we removed */
+    sem_post(&g_queue.spaces_available);
+
+    /* Store the order for the chef to pick up */
+    o.chef_id = chef_id;
+    g_assigned_order[idx]  = o;
+    g_has_assignment[idx]  = 1;
+
+    log_event("[MANUAL] Order #%d -> Chef %d: %s", 2, o.id, chef_id, o.item);
 }
